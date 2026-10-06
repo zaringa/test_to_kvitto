@@ -1,0 +1,45 @@
+name: kvitto-tests
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: kvitto_test
+      POSTGRES_USER: kvitto
+      POSTGRES_PASSWORD: kvitto
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "kvitto", "-d", "kvitto_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      TEST_DATABASE_URL: postgresql+asyncpg://kvitto:kvitto@postgres:5432/kvitto_test
+      TEST_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${TEST_NETWORK_SUBNET:-10.203.1.0/24}

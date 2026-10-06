@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build test image
+        run: docker compose -f compose.test.yaml build tests
+      - name: Ruff lint
+        run: docker compose -f compose.test.yaml run --rm --no-deps tests ruff check .
+      - name: Ruff format
+        run: docker compose -f compose.test.yaml run --rm --no-deps tests ruff format --check .
+      - name: All pytest tests with real PostgreSQL and Redis
+        run: docker compose -f compose.test.yaml run --rm tests
+      - name: Start the four application services
+        run: docker compose up --build --detach --wait --wait-timeout 120
+      - name: Check deployed API
+        run: curl --fail --show-error --silent http://localhost:8000/tariffs
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose logs --no-color
+          docker compose -f compose.test.yaml logs --no-color
+      - name: Stop containers
+        if: always()
+        run: |
+          docker compose down
+          docker compose -f compose.test.yaml down
+
