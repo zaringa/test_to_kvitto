@@ -77,7 +77,7 @@ async def create_payment(session: AsyncSession, payload: dict) -> CommandResult:
 async def apply_webhook(session: AsyncSession, payload: dict) -> CommandResult:
     data = BankWebhook.model_validate(payload)
     # Другой worker дождётся коммита и проверит переход уже из нового статуса.
-    
+
     payment = await session.scalar(
         select(Payment).where(Payment.id == data.payment_id).with_for_update()
     )
