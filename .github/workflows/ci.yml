@@ -36,3 +36,33 @@ jobs:
           docker compose down
           docker compose -f compose.test.yaml down
 
+  publish:
+    name: Publish tested application image
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --target runtime \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --tag "$image:$GITHUB_SHA" \
+            --tag "$image:latest" .
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker push "$image:$GITHUB_SHA"
+          docker push "$image:latest"
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io

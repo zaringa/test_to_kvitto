@@ -35,7 +35,7 @@ sequenceDiagram
 HTTP-запросе: поэтому запрещённый переход статуса сразу возвращает требуемый `409`.
 Ответ клиенту возвращает `api`. Для этой схемы достаточно одной PostgreSQL.
 
-## Запуск
+## Запуск в Docker
 
 Нужны Docker Engine и Docker Compose v2 с поддержкой `--wait`.
 
@@ -62,6 +62,124 @@ Compose использует отдельные подсети `10.203.0.0/24` (
 ```bash
 docker compose logs --follow api worker
 docker compose down
+```
+
+## Запуск без Docker
+
+Нужны Python 3.11+, локальные PostgreSQL и Redis 6.2+ (для `XAUTOCLAIM`). Все команды
+Python выполняйте из корня репозитория. PostgreSQL и Redis должны работать как
+локальные службы, а API и worker запускаются в двух отдельных терминалах.
+
+### 1. Установить и запустить PostgreSQL и Redis
+
+Пример для Ubuntu 24.04 с Python 3.12:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv postgresql redis-server
+sudo systemctl start postgresql redis-server
+pg_isready -h localhost -p 5432
+redis-cli -h localhost -p 6379 ping
+```
+
+PostgreSQL должен сообщить `accepting connections`, Redis — `PONG`. Если службы уже
+установлены и запущены, переходите к созданию БД. На другой ОС установите те же
+зависимости её пакетным менеджером.
+
+### 2. Создать пользователя и базы
+
+Следующие команды выполните один раз. Если пользователь или база уже существуют,
+пропустите соответствующую команду.
+
+```bash
+sudo -u postgres psql -c "CREATE USER kvitto WITH PASSWORD 'kvitto';"
+sudo -u postgres createdb --owner=kvitto kvitto
+sudo -u postgres createdb --owner=kvitto kvitto_test
+```
+
+`kvitto` используется приложением, `kvitto_test` — тестами. Таблицы и тарифы создаются
+автоматически при старте worker. Учетные данные в примере предназначены для локальной
+разработки.
+
+Справка: [создание БД PostgreSQL](https://www.postgresql.org/docs/current/app-createdb.html),
+[установка Redis на Linux](https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/apt/).
+
+### 3. Установить зависимости Python и настроить подключения
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+Создайте `.env` по `.env.example` или дополните существующий файл этими настройками:
+
+```dotenv
+DATABASE_URL=postgresql+asyncpg://kvitto:kvitto@localhost:5432/kvitto
+REDIS_URL=redis://localhost:6379/0
+WEBHOOK_SECRET=
+```
+
+Если нужны только API и worker, установите `requirements.txt` вместо
+`requirements-dev.txt`. Последний дополнительно содержит pytest, httpx и Ruff.
+
+### 4. Запустить worker и API
+
+В первом терминале, из корня проекта:
+
+```bash
+source .venv/bin/activate
+python -m app.worker
+```
+
+Во втором терминале, также из корня проекта:
+
+```bash
+source .venv/bin/activate
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Проверка запуска:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/tariffs
+```
+
+Ожидаемый ответ `/health` — `{"status":"ok"}`, Swagger — <http://localhost:8000/docs>.
+Если порт занят, замените `--port 8000` на `--port 18000` и используйте этот порт в
+URL. При запуске без Docker порт задаётся аргументом Uvicorn; `API_PORT` используется
+только Docker Compose. Остановить API и worker можно через `Ctrl+C` в их терминалах.
+
+### Тесты полностью без Docker
+
+После шагов 1–3 достаточно работающих локальных PostgreSQL и Redis и базы
+`kvitto_test`. API и worker отдельно запускать для pytest не требуется: тесты сами
+создают API и два обработчика.
+
+```bash
+source .venv/bin/activate
+export TEST_DATABASE_URL=postgresql+asyncpg://kvitto:kvitto@localhost:5432/kvitto_test
+export TEST_REDIS_URL=redis://localhost:6379/1
+python -m pytest -q
+ruff check .
+ruff format --check .
+```
+
+Тесты очищают схему указанной тестовой БД перед запуском; имя обязано заканчиваться
+на `_test`. Используйте отдельную базу, как в примере. Для Redis тесты используют
+собственный префикс ключей и удаляют только свои ключи.
+
+`TEST_DATABASE_URL` и `TEST_REDIS_URL` нужно передать через окружение терминала,
+как показано выше: тестовая конфигурация не читает их из `.env`. Порты `55432` и
+`56379` из раздела ниже относятся к тестовым контейнерам; локальные службы в этом
+примере используют `5432` и `6379`.
+
+Для быстрой проверки только расчётов скидки и рассрочки достаточно зависимостей Python;
+службы PostgreSQL и Redis запускать не требуется:
+
+```bash
+python -m pytest tests/test_domain.py -q
 ```
 
 ## Примеры запросов
@@ -179,12 +297,59 @@ uv run --frozen ruff format --check .
 docker compose -f compose.test.yaml down
 ```
 
+Можно установить зависимости обычным pip. `requirements.txt` содержит зависимости
+приложения, `requirements-dev.txt` — те же зависимости плюс pytest, httpx и Ruff.
+Оба файла экспортированы из `uv.lock` с точными версиями.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+docker compose -f compose.test.yaml up --detach --wait postgres redis
+python -m pytest -q
+ruff check .
+ruff format --check .
+docker compose -f compose.test.yaml down
+```
+
+Для установки только приложения: `python -m pip install -r requirements.txt`.
+Docker продолжает использовать `uv.lock`. При изменении зависимостей сначала
+обновите lock-файл через `uv lock`, затем повторите экспорт:
+
+```bash
+uv export --frozen --no-dev --no-hashes --no-emit-project --no-annotate --output-file requirements.txt
+uv export --frozen --no-hashes --no-emit-project --no-annotate --output-file requirements-dev.txt
+```
+
 Тесты по умолчанию подключаются к PostgreSQL на `localhost:55432`, Redis на
 `localhost:56379`. Можно задать `TEST_DATABASE_URL` и `TEST_REDIS_URL`. Имя тестовой БД
 обязано заканчиваться на `_test`: тесты очищают её схему перед запуском.
 
 GitHub Actions (`.github/workflows/ci.yml`) запускается при каждом `push` и
 `pull_request`: Ruff, проверка форматирования, весь pytest, сборка и запуск приложения.
+
+## Доставка Docker-образа (CD)
+
+После успешного CI для push в `main` job `publish` собирает runtime-образ и публикует
+его в GitHub Container Registry. Имя — `ghcr.io/<владелец>/<репозиторий>` в нижнем
+регистре. Публикуются два тега: полный SHA коммита и `latest`. Для воспроизводимого
+деплоя выбирайте тег с SHA. Один образ используется API и worker, команды запуска
+для этих сервисов различаются.
+
+Авторизация использует встроенный `GITHUB_TOKEN` с правом `packages: write`;
+дополнительный пароль Docker Hub не нужен. Организация должна разрешать публикацию
+пакетов через Actions. Для private-пакета серверу потребуется право на чтение GHCR.
+Подробнее: [документация GitHub](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images).
+
+Это автоматическая доставка образа. Для автоматического развёртывания нужно указать
+VPS или платформу, способ подключения и настройки окружения. Текущий workflow
+сервер не обновляет. Успешный CI подтверждает пройденные проверки, а запуск на сервере
+проверяется отдельно при развёртывании.
+
+База контейнера приложения — официальный `python:3.12-slim`, содержащий Python и
+минимальные необходимые пакеты Debian. GitHub Actions выполняется на `ubuntu-latest`.
+Docker-сервер также может работать на Ubuntu: контейнеру не нужна такая же ОС,
+как у сервера. [Описание Python-образа](https://hub.docker.com/_/python).
 
 ## Как разобраться в коде
 
